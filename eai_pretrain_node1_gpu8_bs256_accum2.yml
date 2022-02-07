@@ -1,0 +1,39 @@
+image: registry.console.elementai.com/snow.colab/cuda
+data: 
+    - snow.gabrielhuang_snow.home:/mnt/home
+    - snow.colab.public:/mnt/public
+resources:
+    cpu: 32
+    mem: 256
+    gpu: 8
+    gpuMem: 32
+interactive: false
+preemptable: true
+workdir: /mnt/home/code/mae
+command:
+- /mnt/home/miniconda3/envs/mae/bin/python
+- -m
+- torch.distributed.launch
+- --nproc_per_node=8
+- main_pretrain.py
+- --accum_iter
+- "2"
+- --batch_size
+- "256"
+- --model
+- mae_vit_base_patch16
+- --norm_pix_loss
+- --epochs
+- "800"
+- --warmup_epochs
+- "40"
+- --blr
+- "1.5e-4"
+- --weight_decay
+- "0.05"
+- --data_path
+- /mnt/public/datasets/imagenet/raw/
+- --output_dir
+- output/pretrain_node1_gpu8_bs256_accum2
+- --log_dir
+- output/pretrain_node1_gpu8_bs256_accum2
