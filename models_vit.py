@@ -15,13 +15,26 @@ import torch
 import torch.nn as nn
 
 import timm.models.vision_transformer
+from timm.models.vision_transformer import PatchEmbed  # with version 0.3.2
+# from timm.models.layers.patch_embed import PatchEmbed for newer versions
 
 
 class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
     """ Vision Transformer with support for global average pooling
     """
-    def __init__(self, global_pool=False, **kwargs):
+    def __init__(self, global_pool=False, patch_embedder:str ='default', **kwargs):
         super(VisionTransformer, self).__init__(**kwargs)
+
+        self.patch_embedder = patch_embedder
+
+        # Patch Model for Sentinel2
+        # CCB: UPDATE STEM FOR MORE BANDS
+        # easiest way is to change patch_embed
+        print('Patching model for sentinel2')
+        self.sentinel2_patch_embed = PatchEmbed(
+            img_size=224, patch_size=16, in_chans=13, embed_dim=self.embed_dim)
+        print('Disabling gradient for default patch embedder')
+        self.patch_embed.requires_grad_(False)
 
         self.global_pool = global_pool
         if self.global_pool:
@@ -33,7 +46,35 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
 
     def forward_features(self, x):
         B = x.shape[0]
-        x = self.patch_embed(x)
+
+        if self.patch_embedder == 'default':
+            x = self.patch_embed(x)
+        elif self.patch_embedder == 'sentinel2':
+            x = self.sentinel2_patch_embed(x)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+
+        for blk in self.blocks:
+            x = blk(x)
+
+        if self.global_pool:
+            x = x[:, 1:, :].mean(dim=1)  # global pool without cls token
+            outcome = self.fc_norm(x)
+        else:
+            x = self.norm(x)
+            outcome = x[:, 0]
+
+        return outcome
+
+
+class CCBVisionTransformer(VisionTransformer):
+
+    def forward_features(self, x):
+        B = x.shape[0]
+        x = self.sentinel2_patch_embed(x)
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)

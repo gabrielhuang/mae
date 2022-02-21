@@ -38,6 +38,8 @@ import models_vit
 
 from engine_finetune import train_one_epoch, evaluate
 
+from util.ccb_datasets import build_ccb_dataset, ccb_collate_fn
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE fine-tuning for image classification', add_help=False)
@@ -119,6 +121,8 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument('--data_type', default='ccb', type=str, choices=['ccb', 'imagefolder'],
+                        help='dataset path')
     parser.add_argument('--nb_classes', default=1000, type=int,
                         help='number of the classification types')
 
@@ -170,10 +174,18 @@ def main(args):
 
     cudnn.benchmark = True
 
-    print('Building Training Dataset')
-    dataset_train = build_dataset(is_train=True, args=args)
-    print('Building Validation Dataset')
-    dataset_val = build_dataset(is_train=False, args=args)
+    if args.data_type == 'imagefolder':
+        print('Building Training Dataset')
+        dataset_train = build_dataset(is_train=True, args=args)
+        print('Building Validation Dataset')
+        dataset_val = build_dataset(is_train=False, args=args)
+        collate_fn = None
+    elif args.data_type == 'ccb':
+        print('Building CCB Training Dataset')
+        dataset_train = build_ccb_dataset(is_train=True, args=args)
+        print('Building CCB Validation Dataset')
+        dataset_val = build_ccb_dataset(is_train=False, args=args)        
+        collate_fn = ccb_collate_fn
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -207,6 +219,7 @@ def main(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
+        collate_fn=collate_fn
     )
 
     data_loader_val = torch.utils.data.DataLoader(
@@ -214,8 +227,37 @@ def main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
-        drop_last=False
+        drop_last=False,
+        collate_fn=collate_fn
     )
+
+    print('TEST')
+    train_batch = next(iter(data_loader_train))
+
+    def visualize_batch(batch, indices=None, dir='tmp', quantile=0.05):
+        import matplotlib.pyplot as plt
+        if not (os.path.exists(dir) and os.path.isdir(dir)):
+            os.makedirs(dir)
+        plt.figure(figsize=(16, 12), dpi=160)
+        data, label, band = batch
+        nband = len(band)
+        import numpy as np
+        sqrt = int(np.ceil(np.sqrt(nband)))
+        if indices is None:
+            indices = list(range(len(data)))
+        for idx in indices:
+            for i in range(nband):
+                plt.subplot(sqrt, sqrt, i+1)
+                plt.title(band[i])
+                # get max and min
+                maxi = torch.quantile(data[idx,:,:,i], 1-quantile).item()
+                mini = torch.quantile(data[idx,:,:,i].min(), quantile).item()
+                rescaled = torch.clamp((data[idx,:,:,i] - mini) / max(maxi - mini, 1e-6), 0, 1)
+                plt.imshow(rescaled, cmap='gray')
+            plt.savefig('{}/idx_{}.jpg'.format(dir, idx))
+
+
+    #visualize_batch(train_batch)
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
@@ -230,6 +272,7 @@ def main(args):
         num_classes=args.nb_classes,
         drop_path_rate=args.drop_path,
         global_pool=args.global_pool,
+        patch_embedder='sentinel2', # CCD patch here
     )
 
     if args.finetune and not args.eval:
@@ -249,14 +292,16 @@ def main(args):
         # load pre-trained model
         msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
+        missing_keys_without_sentinel2 = [x for x in msg.missing_keys if 'sentinel2_patch_embed' not in x]
 
         if args.global_pool:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
+            assert set(missing_keys_without_sentinel2) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
         else:
-            assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+            assert set(missing_keys_without_sentinel2) == {'head.weight', 'head.bias'}
 
         # manually initialize fc layer
         trunc_normal_(model.head.weight, std=2e-5)
+
 
     model.to(device)
 
@@ -305,6 +350,7 @@ def main(args):
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         exit(0)
+
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
